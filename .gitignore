@@ -1,0 +1,8 @@
+node_modules/
+*.tgz
+.test-artifacts/
+.dsh-dev/
+.env*
+config.local.json
+开发调研与流程.md
+开发计划.md

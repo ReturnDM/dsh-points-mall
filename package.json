@@ -1,6 +1,6 @@
 {
   "name": "dsh-points-mall",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "生活积分账本：DSH 侧栏积分卡片、对话记账和首次配置",
   "type": "module",
   "license": "MIT",

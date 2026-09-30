@@ -10,6 +10,7 @@ export interface LedgerEntry {
   rate?: number
   idempotencyKey?: string
   idempotencyFingerprint?: string
+  idempotencyFingerprintVersion?: 1 | 2
 }
 
 export interface Summary {
@@ -27,6 +28,13 @@ export interface Summary {
   day: string
   timeZone: string
   updatedAt: string
+}
+
+export interface ErrorSummary {
+  status: 'error'
+  code: string
+  message: string
+  timeZone: string
 }
 
 export interface TaskPricing {
@@ -77,13 +85,17 @@ export interface OperationOptions { signal?: AbortSignal }
 export interface Ledger {
   summary(): Promise<Summary>
   rules(): Promise<Rules>
+  /** One loaded view; does not promise an atomic snapshot across external edits. */
+  rulesWithSummary(): Promise<Rules & { summary: Summary }>
   list(limit?: number): Promise<LedgerEntry[]>
+  listWithSummary(limit?: number): Promise<{ entries: LedgerEntry[]; summary: Summary }>
   earn(input: EarnInput, options?: OperationOptions): Promise<MutationResult>
   adjust(input: AdjustInput, options?: OperationOptions): Promise<MutationResult>
   redeem(input: RedeemInput, options?: OperationOptions): Promise<MutationResult>
   use(input: VoucherInput, options?: OperationOptions): Promise<MutationResult>
   recycle(input: VoucherInput, options?: OperationOptions): Promise<MutationResult>
   doctor(): Promise<ValidationReport>
+  doctorWithSummary(): Promise<ValidationReport & { summary: Summary | ErrorSummary }>
 }
 
 export function createLedger(dataDir: string, options?: { timeZone?: string; now?: () => Date }): Promise<Ledger>

@@ -12,7 +12,8 @@ import { PointsHostService } from './host/service.ts'
 import { createPointsTools } from './host/tools.ts'
 import { POINTS_MALL_SKILL } from './host/skill.ts'
 import { createJevJudge } from './host/jev.ts'
-import { createJevCredentials } from './host/jev-credentials.js'
+import { createJevCredentials } from './host/jev-credentials.ts'
+import { PointsMallUpdates } from './host/updates.ts'
 
 /** Stable plugin entry id, also used by the Client's ConfigForms. */
 export const name = 'points-mall'
@@ -39,6 +40,7 @@ export const Config = z.object({
 /** Register authenticated routes, model tools, and the bundled conversation skill. */
 export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => ctx.settings.configure({ auto: false }, ctx.fiber), 'points-mall: configuration')
+  const updates = new PointsMallUpdates(ctx)
   const credentials = createJevCredentials(ctx.credentials)
   const judge = createJevJudge({
     enabled: () => config.jevEnabled.get(),
@@ -47,7 +49,7 @@ export function apply(ctx: Context, config: Config): void {
   const service = new PointsHostService(() => ({
     dataDir: config.dataDir.get(), timeZone: config.timeZone.get(),
     setupVersion: config.setupVersion.get(), jevEnabled: config.jevEnabled.get(),
-  }), join(resolveDshHome(), 'points-mall', 'data'), judge)
+  }), join(resolveDshHome(), 'points-mall', 'data'), judge, () => updates.notify())
 
   for (const [path, methods] of [
     ['/api/points-mall/summary', ['GET']],

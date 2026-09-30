@@ -1,3 +1,23 @@
+/** Translate invalid bodies without swallowing transport cancellation. */
+export async function readJsonResponse<T>(response: Response): Promise<T> {
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== 'SyntaxError') throw error
+    throw new Error(response.ok
+      ? '服务返回的内容不是有效 JSON，请重试。'
+      : `请求失败（HTTP ${response.status}），请重试。`)
+  }
+  if (!response.ok) {
+    const message = (value as { error?: { message?: unknown } } | null)?.error?.message
+    throw new Error(typeof message === 'string'
+      ? `请求失败（HTTP ${response.status}）：${message}`
+      : `请求失败（HTTP ${response.status}），请重试。`)
+  }
+  return value as T
+}
+
 export async function requestJson<T>(
   path: string,
   options: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal } = {},
@@ -11,10 +31,5 @@ export async function requestJson<T>(
     cache: 'no-store',
     signal,
   })
-  const value = await response.json() as { error?: { message?: unknown } }
-  if (!response.ok) {
-    const message = value?.error?.message
-    throw new Error(typeof message === 'string' ? message : '操作暂时未能完成，请重试。')
-  }
-  return value as T
+  return readJsonResponse<T>(response)
 }

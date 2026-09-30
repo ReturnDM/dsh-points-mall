@@ -26,14 +26,14 @@ export function createPointsTools(service: PointsHostService): ToolDefinition[] 
     }),
     defineTool({
       name: 'points_mall_rules', description: '读取当前账本的专项规则、固定事项分值、可用商品和回收比例。奖励前先读这些规则。', parameters: {}, output,
-      execute: async () => jsonValue({ ...await service.rules(), summary: await service.summary() }),
+      execute: async () => jsonValue(await service.rulesWithSummary()),
       isConcurrencySafe: () => true,
       presentCall: () => ({ card: 'generic', title: '读取积分规则', kind: 'read' }),
     }),
     defineTool({
       name: 'points_mall_list', description: '读取最近的真实积分流水，核对重复奖励和更正、兑换、核销的引用 id。',
       parameters: { limit: { type: 'integer', description: '最近流水数量，1 到 1000，默认 20。' } }, output,
-      execute: async args => jsonValue({ entries: await service.list(args.limit), summary: await service.summary() }),
+      execute: async args => jsonValue(await service.listWithSummary(args.limit)),
       isConcurrencySafe: () => true,
       presentCall: () => ({ card: 'generic', title: '查询积分流水', kind: 'read' }),
     }),
@@ -77,17 +77,17 @@ export function createPointsTools(service: PointsHostService): ToolDefinition[] 
     }),
     defineTool({
       name: 'points_mall_doctor', description: '只读检查账本、引用关系与文件格式，返回问题列表，不自动修复或删除任何记录。', parameters: {}, output,
-      execute: async () => jsonValue({ ...await service.doctor(), summary: await service.summary() }),
+      execute: async () => jsonValue(await service.doctorWithSummary()),
       isConcurrencySafe: () => true,
       presentCall: () => ({ card: 'generic', title: '检查积分账本', kind: 'read' }),
     }),
     defineTool({
-      name: 'points_mall_judge', description: '可选 Jev 复核：根据真实账本规则评估当前模型建议的奖励积分，只提供建议，不直接写账。未启用、缺少凭据或失败时返回 fallback，继续由当前模型按规则判断。',
+      name: 'points_mall_judge', description: '可选 Jev 复核：根据真实账本规则评估当前模型建议的奖励积分，只提供建议，不直接写账。未启用、缺少凭据或外部失败时由当前模型按规则判断；未配置或规则无法读取时先完成配置或修复，再继续记账。',
       parameters: {
         task: { type: 'string', required: true, description: '实际已完成事项及必要投入说明。' },
         proposedPoints: { type: 'integer', required: true, description: '当前模型拟定的正整数奖励分值。' },
       }, output,
-      execute: async (args, exec) => jsonValue({ ...await service.review(args.task, args.proposedPoints, exec.signal), summary: await service.summary() }),
+      execute: async (args, exec) => jsonValue(await service.reviewWithSummary(args.task, args.proposedPoints, exec.signal)),
       isConcurrencySafe: () => true,
       presentCall: () => ({ card: 'generic', title: '复核奖励积分', kind: 'read' }),
     }),

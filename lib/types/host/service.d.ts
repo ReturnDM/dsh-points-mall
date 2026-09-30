@@ -43,25 +43,43 @@ export declare class PointsHostService {
     private readonly getConfig;
     readonly defaultDataDir: string;
     private readonly judge?;
-    constructor(getConfig: () => PointsHostConfig, defaultDataDir: string, judge?: PointsJudge | undefined);
+    private readonly onMutation?;
+    constructor(getConfig: () => PointsHostConfig, defaultDataDir: string, judge?: PointsJudge | undefined, onMutation?: (() => void) | undefined);
     /** Read a snapshot for the current data directory; unconfigured plugins do no filesystem work. */
     summary(): Promise<PointsSummary>;
     /** Create public defaults only after a user asks; saving the connection remains the form's responsibility. */
     initialize(directory?: string): Promise<{
         dataDir: string;
         summary: import("../ledger/index.mjs").Summary;
-        validation: import("../ledger/index.mjs").ValidationReport;
+        validation: {
+            valid: boolean;
+            issues: string[];
+            entryCount: number;
+        };
     }>;
     /** Validate and preview an existing directory without initializing or repairing files. */
     validate(directory: string): Promise<{
         dataDir: string;
         summary: import("../ledger/index.mjs").Summary;
-        validation: import("../ledger/index.mjs").ValidationReport;
+        validation: {
+            valid: boolean;
+            issues: string[];
+            entryCount: number;
+        };
     }>;
     /** Read actual rules, fixed tasks, and shop items before selecting a reward. */
     rules(): Promise<import("../ledger/index.mjs").Rules>;
+    /** Derive rules and balance in the engine's combined read under one configuration. */
+    rulesWithSummary(): Promise<import("../ledger/index.mjs").Rules & {
+        summary: import("../ledger/index.mjs").Summary;
+    }>;
     /** Query newest persisted entries. */
     list(limit?: number): Promise<import("../ledger/index.mjs").LedgerEntry[]>;
+    /** Derive newest entries and balance from the same engine scan. */
+    listWithSummary(limit?: number): Promise<{
+        entries: import("../ledger/index.mjs").LedgerEntry[];
+        summary: import("../ledger/index.mjs").Summary;
+    }>;
     /** Append one reward and include the resulting balance and level. */
     earn(input: Parameters<Ledger['earn']>[0], signal?: AbortSignal): Promise<import("../ledger/index.mjs").MutationResult>;
     /** Append an adjustment instead of replacing any historical entry. */
@@ -74,6 +92,10 @@ export declare class PointsHostService {
     recycle(input: Parameters<Ledger['recycle']>[0], signal?: AbortSignal): Promise<import("../ledger/index.mjs").MutationResult>;
     /** Check the configured directory without changing it. */
     doctor(): Promise<import("../ledger/index.mjs").ValidationReport>;
+    /** Validate and summarize one scanned set of entries, including corrupt-ledger errors. */
+    doctorWithSummary(): Promise<import("../ledger/index.mjs").ValidationReport & {
+        summary: import("../ledger/index.mjs").Summary | import("../ledger/index.mjs").ErrorSummary;
+    }>;
     /** Review a proposed reward with the actual rules; it never records points. */
     review(task: string, proposedPoints: number, signal?: AbortSignal): Promise<{
         status: "reviewed" | "fallback";
@@ -81,8 +103,22 @@ export declare class PointsHostService {
         probability?: number;
         message: string;
     }>;
+    /** Attach a balance using the configuration captured before the optional remote review. */
+    reviewWithSummary(task: string, proposedPoints: number, signal?: AbortSignal): Promise<{
+        summary: PointsSummary;
+        status: "reviewed" | "fallback";
+        accepted?: boolean;
+        probability?: number;
+        message: string;
+    }>;
     /** Handle routes only after DSH Connection has authenticated and trusted the request. */
     fetch(request: Request): Promise<Response>;
+    private captureConfig;
+    private validateLimit;
+    private summaryForConfig;
+    private validateForConfig;
+    private mutate;
+    private reviewForConfig;
     private ledger;
 }
 export {};

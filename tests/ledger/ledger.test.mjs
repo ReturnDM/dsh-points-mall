@@ -6,6 +6,9 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
+import fsPromises from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
+import { createHash } from 'node:crypto'
 
 async function loadLedger() {
   let api
@@ -310,4 +313,136 @@ test('取得本人写锁后取消在提交前停止并释放本人锁', async t 
   await assert.rejects(() => ledger.earn({ title: '提交前取消', points: 10 }, { signal: controller.signal }), { name: 'AbortError' })
   assert.deepEqual(await ledger.list(), [])
   await assert.rejects(() => readFile(join(dir, '.ledger.lock')), { code: 'ENOENT' })
+})
+
+async function countLedgerReads(dir, operation) {
+  const original = fsPromises.readFile
+  const prefix = join(dir, 'ledger').replaceAll('\\', '/') + '/'
+  let reads = 0
+  fsPromises.readFile = async function(path, ...args) {
+    const value = String(path).replaceAll('\\', '/')
+    if (value.startsWith(prefix) && value.endsWith('.json')) reads++
+    return original.call(this, path, ...args)
+  }
+  syncBuiltinESMExports()
+  try { return { value: await operation(), reads } }
+  finally { fsPromises.readFile = original; syncBuiltinESMExports() }
+}
+
+test('组合规则与摘要只扫描一次账本并返回真实规则', async t => {
+  const { dir, ledger } = await configured(t)
+  assert.equal(typeof ledger.rulesWithSummary, 'function', '规则组合读取尚未实现')
+  await writeEntry(dir, earnEntry('one', 7))
+  await writeEntry(dir, earnEntry('two', 14))
+  await writeFile(join(dir, '积分规则.md'), '测试固定规则\n')
+  const { value, reads } = await countLedgerReads(dir, () => ledger.rulesWithSummary())
+  assert.equal(reads, 2)
+  assert.equal(value.rulesMarkdown, '测试固定规则\n')
+  assert.ok(Array.isArray(value.tasks.tiers))
+  assert.equal(value.summary.balance, 21)
+})
+
+test('组合流水与摘要从同一次读取派生，排序与limit不会截断汇总', async t => {
+  const { dir, ledger } = await configured(t)
+  assert.equal(typeof ledger.listWithSummary, 'function', '流水组合读取尚未实现')
+  await writeEntry(dir, earnEntry('earlier', 7, '2026-09-30T01:00:00Z'))
+  await writeEntry(dir, earnEntry('later', 14, '2026-09-30T02:00:00Z'))
+  const { value, reads } = await countLedgerReads(dir, () => ledger.listWithSummary(1))
+  assert.equal(reads, 2)
+  assert.deepEqual(value.entries.map(entry => entry.id), ['later'])
+  assert.equal(value.summary.balance, 21)
+  assert.equal(value.summary.todayEarned, 21)
+  assert.deepEqual((await ledger.listWithSummary(0)).entries, [])
+  await assert.rejects(() => ledger.listWithSummary(-1), /limit/)
+})
+
+test('组合自检与摘要复用同一扫描，坏账本返回同一视图的错误摘要', async t => {
+  const { dir, ledger } = await configured(t)
+  assert.equal(typeof ledger.doctorWithSummary, 'function', '自检组合读取尚未实现')
+  await writeEntry(dir, earnEntry('one', 7))
+  const ready = await countLedgerReads(dir, () => ledger.doctorWithSummary())
+  assert.equal(ready.reads, 1)
+  assert.equal(ready.value.valid, true)
+  assert.equal(ready.value.entryCount, 1)
+  assert.equal(ready.value.summary.balance, 7)
+  await writeFile(join(dir, 'ledger', 'broken.json'), '{broken')
+  const broken = await countLedgerReads(dir, () => ledger.doctorWithSummary())
+  assert.equal(broken.reads, 2)
+  assert.equal(broken.value.valid, false)
+  assert.equal(broken.value.entryCount, 1)
+  assert.equal(broken.value.summary.status, 'error')
+  assert.equal(broken.value.summary.code, 'INVALID_LEDGER')
+  assert.equal(broken.value.summary.timeZone, 'Asia/Shanghai')
+  assert.ok(broken.value.summary.message.includes('broken.json'))
+  assert.equal(await readFile(join(dir, 'ledger', 'broken.json'), 'utf8'), '{broken')
+})
+
+test('规则损坏的组合自检仍保留可信账本摘要且不把规则错误说成坏流水', async t => {
+  const { dir, ledger } = await configured(t)
+  assert.equal(typeof ledger.doctorWithSummary, 'function', '自检组合读取尚未实现')
+  await writeEntry(dir, earnEntry('one', 7))
+  await writeFile(join(dir, 'tasks.json'), JSON.stringify({ tiers: [14, 7], tasks: [] }))
+  const value = await ledger.doctorWithSummary()
+  assert.equal(value.valid, false)
+  assert.ok(value.issues.some(issue => issue.includes('规则')))
+  assert.equal(value.summary.status, 'ready')
+  assert.equal(value.summary.balance, 7)
+  await assert.rejects(() => ledger.rulesWithSummary(), /规则/)
+})
+
+test('v2幂等按实际写入参数归一化，外部空白不重记而内部备注格式仍保留', async t => {
+  const { ledger } = await configured(t)
+  const first = await ledger.earn({ title: '  阅读  ', points: 25, note: '  第一行\n\n 第二行  ', idempotencyKey: '  normalize-once  ', ignoredHint: '不用的参数' })
+  assert.equal(first.entry.title, '阅读')
+  assert.equal(first.entry.note, '第一行\n\n 第二行')
+  assert.equal(first.entry.idempotencyFingerprintVersion, 2)
+  const retry = await ledger.earn({ title: '阅读', points: 25, note: '第一行\n\n 第二行', idempotencyKey: 'normalize-once', ignoredHint: '不同的无效参数' })
+  assert.equal(retry.duplicate, true)
+  assert.equal(retry.entry.id, first.entry.id)
+  assert.equal((await ledger.summary()).balance, 25)
+  await assert.rejects(() => ledger.earn({ title: '阅读', points: 26, note: '第一行\n\n 第二行', idempotencyKey: 'normalize-once' }), /幂等/)
+  await assert.rejects(() => ledger.earn({ title: '阅读', points: 25, note: '第一行\n 第二行', idempotencyKey: 'normalize-once' }), /幂等/)
+})
+
+test('v2幂等仍区分更正参数、真实引用、商品和操作类型', async t => {
+  const { ledger } = await configured(t)
+  const first = (await ledger.earn({ title: '任务一', points: 200 })).entry
+  const second = (await ledger.earn({ title: '任务二', points: 50 })).entry
+  const adjusted = await ledger.adjust({ ref: `  ${first.id}  `, points: -10, exp: -10, title: '  更正任务一  ', note: '  差额  ', idempotencyKey: 'adjust-once' })
+  assert.equal(adjusted.entry.title, '更正任务一')
+  assert.equal(adjusted.entry.note, '差额')
+  assert.equal((await ledger.adjust({ ref: first.id, points: -10, exp: -10, title: '更正任务一', note: '差额', idempotencyKey: 'adjust-once' })).duplicate, true)
+  await assert.rejects(() => ledger.adjust({ ref: first.id, points: -10, exp: -5, title: '更正任务一', note: '差额', idempotencyKey: 'adjust-once' }), /幂等/)
+  await assert.rejects(() => ledger.adjust({ ref: second.id, points: -10, exp: -10, title: '更正任务一', note: '差额', idempotencyKey: 'adjust-once' }), /幂等/)
+  const redeem = await ledger.redeem({ itemId: '  relax-break  ', note: '  奖励休息  ', idempotencyKey: 'redeem-once' })
+  assert.equal((await ledger.redeem({ itemId: 'relax-break', note: '奖励休息', idempotencyKey: 'redeem-once' })).duplicate, true)
+  await assert.rejects(() => ledger.redeem({ itemId: 'movie-night', note: '奖励休息', idempotencyKey: 'redeem-once' }), /幂等/)
+  await ledger.use({ ref: `  ${redeem.entry.id}  `, note: '  用券  ', idempotencyKey: 'consume-once' })
+  assert.equal((await ledger.use({ ref: redeem.entry.id, note: '用券', idempotencyKey: 'consume-once' })).duplicate, true)
+  await assert.rejects(() => ledger.recycle({ ref: redeem.entry.id, note: '用券', idempotencyKey: 'consume-once' }), /幂等/)
+})
+
+test('无版本v1流水支持精确原始参数重试，无法还原的空白参数拒绝且不改历史', async t => {
+  const { dir, ledger } = await configured(t)
+  const raw = { title: '  旧奖励  ', points: 25, note: '旧理由  ', idempotencyKey: 'legacy-once', oldExtra: '旧指纹包含的参数' }
+  const args = Object.fromEntries(Object.keys(raw).filter(key => key !== 'idempotencyKey' && raw[key] !== undefined).sort().map(key => [key, raw[key]]))
+  const entry = { ...earnEntry('legacy', 25), title: '旧奖励', note: '旧理由  ', idempotencyKey: raw.idempotencyKey, idempotencyFingerprint: createHash('sha256').update(JSON.stringify({ operation: 'earn', args })).digest('hex') }
+  await writeEntry(dir, entry)
+  const before = await readFile(join(dir, 'ledger', '2026-09', 'legacy.json'), 'utf8')
+  const retry = await ledger.earn(raw)
+  assert.equal(retry.duplicate, true)
+  assert.equal(retry.entry.id, 'legacy')
+  await assert.rejects(() => ledger.earn({ ...raw, title: '旧奖励' }), /幂等/)
+  await assert.rejects(() => ledger.earn({ ...raw, points: 26 }), /幂等/)
+  assert.equal(await readFile(join(dir, 'ledger', '2026-09', 'legacy.json'), 'utf8'), before)
+  assert.equal((await ledger.list()).length, 1)
+})
+
+test('v2指纹不能把显式零更正误当成省略参数的全额冲正', async t => {
+  const { ledger } = await configured(t)
+  const original = (await ledger.earn({ title: '保留的奖励', points: 25 })).entry
+  const zero = await ledger.adjust({ ref: original.id, points: 0, exp: 0, idempotencyKey: 'zero-delta-once' })
+  assert.equal(zero.summary.balance, 25)
+  await assert.rejects(() => ledger.adjust({ ref: original.id, idempotencyKey: 'zero-delta-once' }), /幂等/)
+  assert.equal((await ledger.summary()).balance, 25)
 })

@@ -173,7 +173,38 @@ function safeInteger(value, name) {
 
 function normalizeNote(note) {
   if (note !== undefined && typeof note !== 'string') fail('note 必须是文字')
-  return note
+  return note?.trim()
+}
+
+const WRITE_FIELDS = {
+  earn: ['title', 'points', 'note'],
+  adjust: ['ref', 'points', 'exp', 'title', 'note'],
+  redeem: ['itemId', 'note'],
+  use: ['ref', 'note'],
+  recycle: ['ref', 'note'],
+}
+
+function sortedDefinedFields(args) {
+  return Object.fromEntries(Object.keys(args).filter(key => key !== 'idempotencyKey' && args[key] !== undefined).sort().map(key => [key, args[key]]))
+}
+
+function normalizedWriteFields(operation, args) {
+  const normalized = {}
+  for (const key of WRITE_FIELDS[operation]) {
+    if (args[key] === undefined) continue
+    normalized[key] = key === 'note' ? normalizeNote(args[key])
+      : ['title', 'ref', 'itemId'].includes(key) ? requiredString(args[key], key) : args[key]
+  }
+  return sortedDefinedFields(normalized)
+}
+
+function requestFingerprint(operation, args, version) {
+  // Historical v1 hashed every raw argument. Only exact raw retries can match
+  // it safely; normalized stored titles cannot reconstruct whitespace lost then.
+  const request = version === 2
+    ? { version: 2, operation, args: normalizedWriteFields(operation, args) }
+    : { operation, args: sortedDefinedFields(args) }
+  return createHash('sha256').update(JSON.stringify(request)).digest('hex')
 }
 
 function findEntry(entries, ref, type) {
@@ -217,6 +248,15 @@ export async function createLedger(dataDir, { timeZone = 'Asia/Shanghai', now = 
       todayEarned, day, timeZone, updatedAt: date.toISOString(),
     }
   }
+  const errorSummary = (issues) => ({
+    status: 'error', code: 'INVALID_LEDGER',
+    message: `账本存在问题，拒绝读取汇总或写账：${issues.join('；')}`, timeZone,
+  })
+  const sortedList = (entries, limit) => [...entries]
+    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time) || b.id.localeCompare(a.id)).slice(0, limit)
+  const validateLimit = (limit) => {
+    if (!Number.isSafeInteger(limit) || limit < 0) fail('limit 必须是非负安全整数')
+  }
   const makeEntry = (type, title, points, exp, extra = {}) => {
     const date = currentDate(), local = dateFormat.format(date).replaceAll('-', '')
     return { id: `${local}-${date.toISOString().slice(11, 19).replaceAll(':', '')}-${randomUUID().slice(0, 8)}`, time: date.toISOString(), type, title, points, exp, ...extra }
@@ -225,8 +265,7 @@ export async function createLedger(dataDir, { timeZone = 'Asia/Shanghai', now = 
     signal?.throwIfAborted()
     const note = normalizeNote(args.note)
     const key = args.idempotencyKey === undefined ? undefined : requiredString(args.idempotencyKey, 'idempotencyKey')
-    const fingerprintArgs = Object.fromEntries(Object.keys(args).filter(key => key !== 'idempotencyKey' && args[key] !== undefined).sort().map(key => [key, args[key]]))
-    const fingerprint = createHash('sha256').update(JSON.stringify({ operation, args: fingerprintArgs })).digest('hex')
+    const fingerprint = requestFingerprint(operation, args, 2)
     const release = await acquireLock(dataDir, signal)
     try {
       signal?.throwIfAborted()
@@ -235,13 +274,16 @@ export async function createLedger(dataDir, { timeZone = 'Asia/Shanghai', now = 
       if (key) {
         const existing = entries.find(entry => entry.idempotencyKey === key)
         if (existing) {
-          if (existing.idempotencyFingerprint !== fingerprint) fail('幂等请求标识已用于不同的操作，拒绝重复请求', 'IDEMPOTENCY_CONFLICT')
+          const version = existing.idempotencyFingerprintVersion
+          const retryFingerprint = version === 2 ? fingerprint : version === undefined || version === 1 ? requestFingerprint(operation, args, 1) : undefined
+          if (existing.idempotencyFingerprint !== retryFingerprint || retryFingerprint === undefined)
+            fail('幂等请求标识已用于不同的操作，拒绝重复请求', 'IDEMPOTENCY_CONFLICT')
           return { entry: existing, summary: summaryOf(entries), duplicate: true }
         }
       }
       const entry = await build(entries, note)
       signal?.throwIfAborted()
-      if (key) Object.assign(entry, { idempotencyKey: key, idempotencyFingerprint: fingerprint })
+      if (key) Object.assign(entry, { idempotencyKey: key, idempotencyFingerprint: fingerprint, idempotencyFingerprintVersion: 2 })
       const problems = ledgerErrors([...entries, entry])
       if (problems.length) fail(`操作会使账本无效，拒绝写账：${problems.join('；')}`, 'INVALID_OPERATION')
       const folder = join(dataDir, 'ledger', entry.time.slice(0, 7))
@@ -262,11 +304,29 @@ export async function createLedger(dataDir, { timeZone = 'Asia/Shanghai', now = 
   return {
     async summary() { return summaryOf(await readStrict(dataDir)) },
     async rules() { return readRules(dataDir) },
+    async rulesWithSummary() {
+      // These methods share loaded entries, not a point-in-time filesystem lock.
+      const entries = await readStrict(dataDir)
+      const rules = await readRules(dataDir)
+      return { ...rules, summary: summaryOf(entries) }
+    },
     async list(limit = 20) {
-      if (!Number.isSafeInteger(limit) || limit < 0) fail('limit 必须是非负安全整数')
-      return (await readStrict(dataDir)).sort((a, b) => Date.parse(b.time) - Date.parse(a.time) || b.id.localeCompare(a.id)).slice(0, limit)
+      validateLimit(limit)
+      return sortedList(await readStrict(dataDir), limit)
+    },
+    async listWithSummary(limit = 20) {
+      validateLimit(limit)
+      const entries = await readStrict(dataDir)
+      return { entries: sortedList(entries, limit), summary: summaryOf(entries) }
     },
     async doctor() { return validateData(dataDir) },
+    async doctorWithSummary() {
+      const { entries, issues } = await scanLedger(dataDir)
+      const summary = issues.length ? errorSummary(issues) : summaryOf(entries)
+      try { await readRules(dataDir) }
+      catch (error) { issues.push(error.message) }
+      return { valid: issues.length === 0, issues, entryCount: entries.length, summary }
+    },
     async earn(args, options) {
       const title = requiredString(args.title, 'title'), points = safeInteger(args.points, '积分 points')
       if (points <= 0) fail('获得积分必须为正数；更正请使用 adjust')
